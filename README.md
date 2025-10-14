@@ -40,6 +40,7 @@ This ensures the correct OS, ROS 2 version, and dependencies are installed.
 For team-specific documentation, research notes, meeting minutes, and design documents that are not ROS code, please use the teams/ directory.
 
 teams/
+
 ├── team-1_navigation/   # Research, datasheets for sensors, etc.
 
 ├── team-2_vision/       # Dataset plans, model research, etc.
