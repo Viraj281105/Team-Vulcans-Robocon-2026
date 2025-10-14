@@ -2,6 +2,7 @@ import time
 import cv2 as cv
 import numpy as np
 from picamera2 import Picamera2
+from libcamera import controls
 
 # --- Optimized Settings for Raspberry Pi 3B+ ---
 # Use a lower resolution to significantly speed up processing
@@ -10,14 +11,17 @@ FPS = 20 # Target FPS
 
 picam2 = Picamera2()
 # Use a video configuration that the Pi can handle efficiently
-config = picam2.create_video_configuration(main={"size": (W, H), "format": "BGR888"})
+config = picam2.create_video_configuration(main={"size": (W, H), "format": "RGB888"})
 picam2.configure(config)
 picam2.start()
 time.sleep(2) # Allow camera to warm up
 
+#-----Manually set the camera controls-----
+picam2.set_controls({"AwbEnable":False, "AwbMode": controls.AwbModeEnum.Fluorescent}) 
+
 # --- HSV Color Range for the Blue Scroll Box ---
-lower_blue = np.array([112, 29, 123])
-upper_blue = np.array([130, 255, 255])
+lower_blue = np.array([0, 50, 50])
+upper_blue = np.array([25, 255, 255])
 # -------------------------------------------------------------------
 
 print("Starting lightweight scroll detection. Press 'q' to exit.")
@@ -26,7 +30,7 @@ try:
         frame = picam2.capture_array("main")
 
         # Step 1: Isolate the Blue Color
-        hsv_frame = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+        hsv_frame = cv.cvtColor(frame, cv.COLOR_RGB2HSV)
         color_mask = cv.inRange(hsv_frame, lower_blue, upper_blue)
 
         # Step 2: Clean Up the Mask (use a slightly smaller kernel for performance)
