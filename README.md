@@ -41,8 +41,11 @@ For team-specific documentation, research notes, meeting minutes, and design doc
 
 teams/
 ├── team-1_navigation/   # Research, datasheets for sensors, etc.
+
 ├── team-2_vision/       # Dataset plans, model research, etc.
+
 ├── team-3_strategy-ui/  # State machine diagrams, UI sketches, etc.
+
 └── team-4_integration/  # System architecture diagrams, setup notes, etc.
 
 ---
