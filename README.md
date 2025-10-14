@@ -35,6 +35,18 @@ This ensures the correct OS, ROS 2 version, and dependencies are installed.
 
 ---
 
+### 🗂️ Team Folders
+
+For team-specific documentation, research notes, meeting minutes, and design documents that are not ROS code, please use the teams/ directory.
+
+teams/
+├── team-1_navigation/   # Research, datasheets for sensors, etc.
+├── team-2_vision/       # Dataset plans, model research, etc.
+├── team-3_strategy-ui/  # State machine diagrams, UI sketches, etc.
+└── team-4_integration/  # System architecture diagrams, setup notes, etc.
+
+---
+
 ### 2️⃣ Cloning the Repository (Cleanly!)
 
 > ⚠️ GitHub no longer supports password authentication over HTTPS.  
