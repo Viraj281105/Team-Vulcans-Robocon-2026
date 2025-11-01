@@ -1,120 +1,101 @@
 #!/usr/bin/env python3
-"""
-rect_detect.py
-Detects Blue or Red Kung Fu Scrolls (KFS) and extracts a flat ROI
-for further processing (e.g., character classification).
-
-Usage:
-    python3 rect_detect.py
-Press 'q' to quit.
-"""
-
 import cv2 as cv
 import numpy as np
 
-def detect_scroll(frame):
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+MIN_AREA = 4000          # ignore small objects
+MAX_AREA = 250000        # ignore huge ones
+ASPECT_TOL = 0.4         # tolerance for aspect ratio check
+DEBUG = True              # set False for headless use
+
+# HSV color ranges for blue & red scrolls
+COLOR_RANGES = {
+    "blue": [(100, 80, 80), (130, 255, 255)],   # HSV range for blue
+    "red1": [(0, 100, 80), (10, 255, 255)],     # lower red
+    "red2": [(160, 100, 80), (179, 255, 255)]   # upper red
+}
+
+# -------------------------------
+# HELPER FUNCTIONS
+# -------------------------------
+def color_mask(img_hsv):
+    """Combine red and blue masks"""
+    mask_blue = cv.inRange(img_hsv, np.array(COLOR_RANGES["blue"][0]), np.array(COLOR_RANGES["blue"][1]))
+    mask_red1 = cv.inRange(img_hsv, np.array(COLOR_RANGES["red1"][0]), np.array(COLOR_RANGES["red1"][1]))
+    mask_red2 = cv.inRange(img_hsv, np.array(COLOR_RANGES["red2"][0]), np.array(COLOR_RANGES["red2"][1]))
+    mask_red = cv.bitwise_or(mask_red1, mask_red2)
+    combined = cv.bitwise_or(mask_blue, mask_red)
+    return combined
+
+def detect_scrolls(frame):
+    """Detect red/blue rectangular scrolls even with tilt"""
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+    mask = color_mask(hsv)
 
-    # --- Color ranges for Blue and Red ---
-    lower_blue = np.array([90, 60, 60])
-    upper_blue = np.array([130, 255, 255])
+    # Cleanup
+    mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, np.ones((5,5), np.uint8))
+    mask = cv.morphologyEx(mask, cv.MORPH_OPEN, np.ones((3,3), np.uint8))
 
-    lower_red1 = np.array([0, 100, 70])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 70])
-    upper_red2 = np.array([180, 255, 255])
-
-    mask_blue = cv.inRange(hsv, lower_blue, upper_blue)
-    mask_red = cv.inRange(hsv, lower_red1, upper_red1) | cv.inRange(hsv, lower_red2, upper_red2)
-    mask = cv.bitwise_or(mask_blue, mask_red)
-
-    # --- Morphological filtering ---
-    kernel = cv.getStructuringElement(cv.MORPH_RECT, (5, 5))
-    mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel, iterations=2)
-    mask = cv.morphologyEx(mask, cv.MORPH_OPEN, kernel, iterations=2)
-
-    # --- Contour detection ---
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return frame, None
+    detected = []
 
-    # --- Find largest contour ---
-    contour = max(contours, key=cv.contourArea)
-    area = cv.contourArea(contour)
-    if area < 5000:  # too small, ignore
-        return frame, None
+    for cnt in contours:
+        area = cv.contourArea(cnt)
+        if area < MIN_AREA or area > MAX_AREA:
+            continue
 
-    # --- Approximate polygon ---
-    peri = cv.arcLength(contour, True)
-    approx = cv.approxPolyDP(contour, 0.02 * peri, True)
+        rect = cv.minAreaRect(cnt)
+        (x, y), (w, h), angle = rect
+        if w == 0 or h == 0:
+            continue
 
-    warped = None
-    if len(approx) == 4:
-        # Draw contour
-        cv.drawContours(frame, [approx], -1, (0, 255, 0), 3)
+        aspect_ratio = max(w, h) / min(w, h)
+        if 0.5 - ASPECT_TOL < aspect_ratio < 2.0 + ASPECT_TOL:  # roughly rectangular
+            box = cv.boxPoints(rect)
+            box = np.intp(box)
 
-        # Order points for perspective transform
-        pts = approx.reshape(4, 2)
-        rect = np.zeros((4, 2), dtype="float32")
+            # Color confidence: mean mask value inside box
+            sub_mask = np.zeros_like(mask)
+            cv.drawContours(sub_mask, [box], 0, 255, -1)
+            color_score = cv.mean(mask, mask=sub_mask)[0]
+            if color_score < 50:
+                continue
 
-        s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]  # top-left
-        rect[2] = pts[np.argmax(s)]  # bottom-right
+            detected.append(box)
+            cv.drawContours(frame, [box], 0, (0, 255, 0), 3)
+            cv.putText(frame, "KFS Detected", (int(x - w/2), int(y - h/2 - 10)),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]  # top-right
-        rect[3] = pts[np.argmax(diff)]  # bottom-left
+    return frame, len(detected)
 
-        (tl, tr, br, bl) = rect
-        widthA = np.linalg.norm(br - bl)
-        widthB = np.linalg.norm(tr - tl)
-        heightA = np.linalg.norm(tr - br)
-        heightB = np.linalg.norm(tl - bl)
-        maxWidth = int(max(widthA, widthB))
-        maxHeight = int(max(heightA, heightB))
-
-        dst = np.array([
-            [0, 0],
-            [maxWidth - 1, 0],
-            [maxWidth - 1, maxHeight - 1],
-            [0, maxHeight - 1]
-        ], dtype="float32")
-
-        M = cv.getPerspectiveTransform(rect, dst)
-        warped = cv.warpPerspective(frame, M, (maxWidth, maxHeight))
-
-        cv.putText(frame, "Scroll Detected", (20, 40), cv.FONT_HERSHEY_SIMPLEX,
-                   1, (0, 255, 0), 2, cv.LINE_AA)
-    else:
-        cv.drawContours(frame, [contour], -1, (0, 0, 255), 2)
-
-    return frame, warped
-
-
+# -------------------------------
+# MAIN LOOP
+# -------------------------------
 def main():
     cap = cv.VideoCapture(0)
     if not cap.isOpened():
-        print("❌ Camera not found.")
+        print("❌ Could not open camera.")
         return
 
-    print("Press 'q' to quit.")
+    print("🎥 Press 'q' to quit.")
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        result, roi = detect_scroll(frame)
+        processed, count = detect_scrolls(frame)
 
-        cv.imshow("Scroll Detection", result)
-        if roi is not None:
-            cv.imshow("Warped Scroll ROI", roi)
+        if DEBUG:
+            cv.imshow("KFS Detection", processed)
+            cv.imshow("Mask", color_mask(cv.cvtColor(frame, cv.COLOR_BGR2HSV)))
 
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
     cv.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
