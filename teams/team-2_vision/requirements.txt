@@ -1,0 +1,21 @@
+# === Core Dependencies ===
+numpy>=1.23
+opencv-python>=4.8.0
+matplotlib>=3.8.0
+
+# === Machine Learning / Deep Learning ===
+tensorflow==2.15.0
+keras>=2.15.0
+
+# === Image Processing & Augmentation ===
+Pillow>=10.0.0
+scikit-image>=0.22.0
+imgaug>=0.4.0
+
+# === Utilities ===
+tqdm>=4.66.0
+h5py>=3.10.0
+protobuf>=4.25.0
+
+# === Optional (safe for both laptop & RPi) ===
+imutils>=0.5.4
