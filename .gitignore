@@ -1,7 +1,22 @@
+# Ignore all images and videos globally
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.gif
+*.mp4
+*.avi
+*.mov
+
+# Ignore dataset folders
+dataset/
+datasets/
+data/
+
 # =========================================================
 # ⚙️ Text normalization
 # =========================================================
-# Automatically normalize line endings to LF on commit
 * text=auto eol=lf
 
 # =========================================================
@@ -14,19 +29,6 @@
 *.pth filter=lfs diff=lfs merge=lfs -text
 *.pt filter=lfs diff=lfs merge=lfs -text
 *.weights filter=lfs diff=lfs merge=lfs -text
-
-# =========================================================
-# 🖼️ Image / Video Assets (for training, testing, etc.)
-# =========================================================
-*.png filter=lfs diff=lfs merge=lfs -text
-*.jpg filter=lfs diff=lfs merge=lfs -text
-*.jpeg filter=lfs diff=lfs merge=lfs -text
-*.bmp filter=lfs diff=lfs merge=lfs -text
-*.tiff filter=lfs diff=lfs merge=lfs -text
-*.gif filter=lfs diff=lfs merge=lfs -text
-*.mp4 filter=lfs diff=lfs merge=lfs -text
-*.avi filter=lfs diff=lfs merge=lfs -text
-*.mov filter=lfs diff=lfs merge=lfs -text
 
 # =========================================================
 # 📦 Datasets / Archives
@@ -64,8 +66,8 @@
 # =========================================================
 # 🗒️ Misc
 # =========================================================
-*.log filter=lfs diff=lfs merge=lfs -text
-*.csv filter=lfs diff=lfs merge=lfs -text
+*.log text
+*.csv text
 
 # Virtual environments
 venv/
