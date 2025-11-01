@@ -1,101 +1,135 @@
 #!/usr/bin/env python3
-import cv2 as cv
+"""
+rect_detect.py — KFS Cube Face Capture
+--------------------------------------
+Detects the Kung Fu Scroll (cube) from live camera feed,
+isolates its largest visible face, and saves that face as a
+flattened image (for dataset building).
+
+Press 'q' to exit.
+"""
+
+import cv2
 import numpy as np
+import os
+import time
 
-# -------------------------------
-# CONFIGURATION
-# -------------------------------
-MIN_AREA = 4000          # ignore small objects
-MAX_AREA = 250000        # ignore huge ones
-ASPECT_TOL = 0.4         # tolerance for aspect ratio check
-DEBUG = True              # set False for headless use
+# Create output directory
+output_dir = "/home/viraj/Robocon/Team-Vulcans-Robocon-2026/teams/team-2_vision/captured_faces"
+os.makedirs(output_dir, exist_ok=True)
 
-# HSV color ranges for blue & red scrolls
-COLOR_RANGES = {
-    "blue": [(100, 80, 80), (130, 255, 255)],   # HSV range for blue
-    "red1": [(0, 100, 80), (10, 255, 255)],     # lower red
-    "red2": [(160, 100, 80), (179, 255, 255)]   # upper red
-}
+# Initialize camera
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("❌ Failed to open camera.")
+    exit()
 
-# -------------------------------
-# HELPER FUNCTIONS
-# -------------------------------
-def color_mask(img_hsv):
-    """Combine red and blue masks"""
-    mask_blue = cv.inRange(img_hsv, np.array(COLOR_RANGES["blue"][0]), np.array(COLOR_RANGES["blue"][1]))
-    mask_red1 = cv.inRange(img_hsv, np.array(COLOR_RANGES["red1"][0]), np.array(COLOR_RANGES["red1"][1]))
-    mask_red2 = cv.inRange(img_hsv, np.array(COLOR_RANGES["red2"][0]), np.array(COLOR_RANGES["red2"][1]))
-    mask_red = cv.bitwise_or(mask_red1, mask_red2)
-    combined = cv.bitwise_or(mask_blue, mask_red)
-    return combined
+# Timer for saving images
+last_save_time = 0
+save_interval = 2  # seconds
+img_counter = 1
 
-def detect_scrolls(frame):
-    """Detect red/blue rectangular scrolls even with tilt"""
-    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
-    mask = color_mask(hsv)
+print("📷 Starting camera... Press 'q' to quit.")
 
-    # Cleanup
-    mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, np.ones((5,5), np.uint8))
-    mask = cv.morphologyEx(mask, cv.MORPH_OPEN, np.ones((3,3), np.uint8))
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("❌ Failed to grab frame.")
+        break
 
-    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    detected = []
+    # Resize for performance
+    frame = cv2.resize(frame, (640, 480))
+
+    # Convert to HSV
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Define color ranges for blue and red
+    blue_lower = np.array([90, 80, 50])
+    blue_upper = np.array([130, 255, 255])
+    red_lower1 = np.array([0, 80, 50])
+    red_upper1 = np.array([10, 255, 255])
+    red_lower2 = np.array([170, 80, 50])
+    red_upper2 = np.array([180, 255, 255])
+
+    # Masks
+    mask_blue = cv2.inRange(hsv, blue_lower, blue_upper)
+    mask_red1 = cv2.inRange(hsv, red_lower1, red_upper1)
+    mask_red2 = cv2.inRange(hsv, red_lower2, red_upper2)
+    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+    mask = cv2.bitwise_or(mask_blue, mask_red)
+
+    # Morphological operations
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    # Contour detection
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best_cnt = None
+    best_area = 0
 
     for cnt in contours:
-        area = cv.contourArea(cnt)
-        if area < MIN_AREA or area > MAX_AREA:
-            continue
+        area = cv2.contourArea(cnt)
+        if area > 5000:
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            if len(approx) == 4 and area > best_area:
+                best_area = area
+                best_cnt = approx
 
-        rect = cv.minAreaRect(cnt)
-        (x, y), (w, h), angle = rect
-        if w == 0 or h == 0:
-            continue
+    # If a good cube face found
+    if best_cnt is not None:
+        cv2.drawContours(frame, [best_cnt], -1, (0, 255, 0), 2)
 
-        aspect_ratio = max(w, h) / min(w, h)
-        if 0.5 - ASPECT_TOL < aspect_ratio < 2.0 + ASPECT_TOL:  # roughly rectangular
-            box = cv.boxPoints(rect)
-            box = np.intp(box)
+        # Sort points (top-left, top-right, bottom-right, bottom-left)
+        pts = best_cnt.reshape(4, 2)
+        rect = np.zeros((4, 2), dtype="float32")
 
-            # Color confidence: mean mask value inside box
-            sub_mask = np.zeros_like(mask)
-            cv.drawContours(sub_mask, [box], 0, 255, -1)
-            color_score = cv.mean(mask, mask=sub_mask)[0]
-            if color_score < 50:
-                continue
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
 
-            detected.append(box)
-            cv.drawContours(frame, [box], 0, (0, 255, 0), 3)
-            cv.putText(frame, "KFS Detected", (int(x - w/2), int(y - h/2 - 10)),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
 
-    return frame, len(detected)
+        # Compute width & height for warp
+        (tl, tr, br, bl) = rect
+        widthA = np.linalg.norm(br - bl)
+        widthB = np.linalg.norm(tr - tl)
+        heightA = np.linalg.norm(tr - br)
+        heightB = np.linalg.norm(tl - bl)
+        maxWidth = int(max(widthA, widthB))
+        maxHeight = int(max(heightA, heightB))
 
-# -------------------------------
-# MAIN LOOP
-# -------------------------------
-def main():
-    cap = cv.VideoCapture(0)
-    if not cap.isOpened():
-        print("❌ Could not open camera.")
-        return
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]
+        ], dtype="float32")
 
-    print("🎥 Press 'q' to quit.")
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # Warp perspective
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warp = cv2.warpPerspective(frame, M, (maxWidth, maxHeight))
 
-        processed, count = detect_scrolls(frame)
+        # Show warped face
+        cv2.imshow("Detected Face", warp)
 
-        if DEBUG:
-            cv.imshow("KFS Detection", processed)
-            cv.imshow("Mask", color_mask(cv.cvtColor(frame, cv.COLOR_BGR2HSV)))
+        # Save image every few seconds
+        current_time = time.time()
+        if current_time - last_save_time > save_interval:
+            filename = os.path.join(output_dir, f"kfs_{img_counter:03d}.jpg")
+            cv2.imwrite(filename, warp)
+            print(f"💾 Saved: {filename}")
+            img_counter += 1
+            last_save_time = current_time
 
-        if cv.waitKey(1) & 0xFF == ord('q'):
-            break
+    # Show main window
+    cv2.imshow("KFS Detection", frame)
 
-    cap.release()
-    cv.destroyAllWindows()
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-if __name__ == "__main__":
-    main()
+cap.release()
+cv2.destroyAllWindows()
