@@ -12,7 +12,7 @@ from tensorflow.keras.models import load_model
 import os
 
 # ==== CONFIG ====
-MODEL_PATH = "/home/viraj/Robocon/Team-Vulcans-Robocon-2026/teams/team-2_vision/kfs_classifier.h5"
+MODEL_PATH = "../kfs_classifier.h5"
 IMG_SIZE = (224, 224)  # match your CNN training input size
 CONFIDENCE_THRESHOLD = 0.5  # scroll mask threshold
 

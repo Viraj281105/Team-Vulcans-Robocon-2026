@@ -3,7 +3,7 @@ import numpy as np
 
 # Load the image you provided to find the color range
 # Make sure the image file 'image_f192fa.jpg' is in the same folder
-image = cv.imread('/home/viraj/Robocon/Team-Vulcans-Robocon-2026/teams/team-2_vision/Test_Images/Image1.jpeg')
+image = cv.imread('../Test_Images/Image1.jpeg')
 if image is None:
     print("Error: Could not load image. Make sure 'image_f192fa.jpg' is in the correct path.")
     exit()

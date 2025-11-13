@@ -20,8 +20,10 @@ from tensorflow.keras import layers, models
 from tqdm import tqdm
 
 # --- Paths ---
-BASE_DIR = "/home/viraj/Robocon/Team-Vulcans-Robocon-2026/teams/team-2_vision/dataset"
+BASE_DIR = "/home/meherdeep/rpi-github/Team-Vulcans-Robocon-2026/teams/team-2_vision/dataset"
 EXPANDED_DIR = os.path.join(BASE_DIR, "expanded")
+
+print(EXPANDED_DIR)
 MODEL_NAME = "kfs_classifier_v4_transfer"
 IMG_SIZE = (128, 128)
 BATCH_SIZE = 8
