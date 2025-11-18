@@ -8,7 +8,7 @@
 *.mp4
 *.avi
 *.mov
-
+*.zip
 # Ignore dataset folders
 dataset/
 datasets/
