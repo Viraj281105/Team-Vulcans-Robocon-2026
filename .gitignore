@@ -9,11 +9,18 @@
 *.avi
 *.mov
 *.zip
+*.pth
+*.pt
+*.h5
 # Ignore dataset folders
 dataset/
 datasets/
 data/
-
+kfs_env/
+runs/
+# Ignore model checkpoints
+checkpoints/
+models/
 # =========================================================
 # ⚙️ Text normalization
 # =========================================================
