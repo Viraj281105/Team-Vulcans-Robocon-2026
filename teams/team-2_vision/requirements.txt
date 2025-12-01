@@ -4,8 +4,8 @@ opencv-python>=4.8.0
 matplotlib>=3.8.0
 
 # === Machine Learning / Deep Learning ===
-tensorflow==2.15.0
-keras>=2.15.0
+tensorflow>=2.15.0
+ 
 
 # === Image Processing & Augmentation ===
 Pillow>=10.0.0

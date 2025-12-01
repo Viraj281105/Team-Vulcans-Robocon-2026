@@ -13,7 +13,7 @@ import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input
 
 # --- Config ---
-MODEL_PATH = "/home/viraj/Robocon/Team-Vulcans-Robocon-2026/teams/team-2_vision/kfs_classifier_v4_transfer.keras"
+MODEL_PATH = "/home/meherdeep/rpi-github/Team-Vulcans-Robocon-2026/teams/team-2_vision/kfs_classifier_v4_transfer.keras"
 IMG_SIZE = (128, 128)
 THRESHOLD = 0.5  # Adjust this if the model outputs uncertain scores (try 0.45 or 0.55)
 

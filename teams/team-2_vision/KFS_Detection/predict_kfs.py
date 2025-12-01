@@ -10,8 +10,8 @@ from albumentations.pytorch import ToTensorV2
 # ------------------------------------------------
 # PATHS
 # ------------------------------------------------
-MODEL_PATH = r"D:\Robotics Club\Robocon2026\Team-Vulcans-Robocon-2026\teams\team-2_vision\KFS_Detection\outputs\kfs_mobilenetv3_large_rpi.pt"
-DATASET_PATH = r"D:\Robotics Club\Robocon2026\Team-Vulcans-Robocon-2026\teams\team-2_vision\DatasetIRL"
+MODEL_PATH = r"/home/meherdeep/rpi-github/Team-Vulcans-Robocon-2026/teams/team-2_vision/KFS_Detection/outputs/kfs_mobilenetv3_large_rpi.pt"
+DATASET_PATH = r"/home/meherdeep/rpi-github/Team-Vulcans-Robocon-2026/teams/team-2_vision/dataset"
 
 IMG_SIZE = 224
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
