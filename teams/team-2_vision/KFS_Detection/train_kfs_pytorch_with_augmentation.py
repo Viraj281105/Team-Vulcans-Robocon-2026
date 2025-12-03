@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-train_kfs_pytorch_albu.py
+train_kfs_pytorch_with_augmentation.py
 
-Simplified: use only PyTorch + torchvision transforms (no Albumentations).
-- MobileNetV3-Large (pretrained)
-- Recursive dataset loader (Real/* and Fake/*)
-- Mixed precision (AMP) when CUDA present, MixUp (optional), EarlyStopping, ReduceLROnPlateau
+KFS binary classifier (Real vs Fake) using:
+- MobileNetV3-Large (pretrained on ImageNet)
+- torchvision-only augmentations
+- Mixed precision (AMP) when CUDA is available
+- Optional MixUp (enabled here with alpha=0.2)
+- EarlyStopping on validation AUC
+- ReduceLROnPlateau scheduler on validation AUC
 - TensorBoard logging
-- Exports TorchScript for Raspberry Pi
+- TorchScript export for Raspberry Pi-style deployment
 """
 
-import os
 import time
 import math
 import random
-import argparse
 from glob import glob
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from sklearn.metrics import roc_auc_score, confusion_matrix
 import torchvision.transforms as T
 from torchvision.models import mobilenet_v3_large
 
+
 # --------------------------
 # Utilities
 # --------------------------
@@ -44,17 +46,19 @@ def seed_everything(seed: int = 42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def get_autocast_ctx(device):
+
+def get_autocast_ctx(device: str):
     """Return an appropriate autocast context manager depending on device."""
-    if device == 'cuda' and torch.cuda.is_available():
-        return torch.amp.autocast(device_type='cuda')
+    if device == "cuda" and torch.cuda.is_available():
+        return torch.amp.autocast(device_type="cuda")
     else:
-        # CPU autocast (may not provide speed but keeps API stable)
+        # CPU autocast (mainly for API consistency)
         try:
             return torch.cpu.amp.autocast()
         except Exception:
             from contextlib import nullcontext
             return nullcontext()
+
 
 # --------------------------
 # Dataset (torchvision transforms)
@@ -68,22 +72,33 @@ class KFS_TorchDataset(Dataset):
 
         # Train transforms (simple, robust torchvision pipeline)
         self.train_transform = T.Compose([
-            T.Resize(int(img_size * 1.15)),                 # small upsample for cropping
+            T.Resize(int(img_size * 1.15)),  # small upsample for cropping
             T.RandomResizedCrop(img_size, scale=(0.7, 1.0), ratio=(0.8, 1.2)),
             T.RandomHorizontalFlip(p=0.5),
-            T.RandomApply([T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.05)], p=0.6),
-            T.RandomApply([T.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.2),
-            T.ToTensor(),
-            T.Normalize(mean=(0.485, 0.456, 0.406),
-                        std=(0.229, 0.224, 0.225))
+            T.RandomApply(
+                [T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.05)],
+                p=0.6,
+            ),
+            T.RandomApply(
+                [T.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))],
+                p=0.2,
+            ),
+            T.ToTensor(),  # must be before RandomErasing
+            T.RandomErasing(p=0.1, scale=(0.02, 0.2)),
+            T.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
         ])
 
-        # Validation transforms: deterministic
+        # Validation transforms: deterministic, no strong augments
         self.val_transform = T.Compose([
             T.Resize((img_size, img_size)),
             T.ToTensor(),
-            T.Normalize(mean=(0.485, 0.456, 0.406),
-                        std=(0.229, 0.224, 0.225))
+            T.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
         ])
 
     def __len__(self):
@@ -96,7 +111,6 @@ class KFS_TorchDataset(Dataset):
         # Read with cv2 (BGR) -> convert to RGB -> PIL Image
         img_bgr = cv2.imread(p)
         if img_bgr is None:
-            # fallback to PIL open
             img = Image.open(p).convert("RGB")
         else:
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -109,33 +123,51 @@ class KFS_TorchDataset(Dataset):
 
         return img_t, torch.tensor(label, dtype=torch.float32)
 
+
 # --------------------------
 # MixUp
 # --------------------------
 def mixup_data(x, y, alpha=0.4):
+    """
+    x: images [B, C, H, W]
+    y: labels [B, 1]
+    """
     if alpha <= 0:
         return x, y, None, None, 1.0
     lam = np.random.beta(alpha, alpha)
     batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(x.device)
+    index = torch.randperm(batch_size, device=x.device)
     mixed_x = lam * x + (1 - lam) * x[index, :]
     y_a, y_b = y, y[index]
     return mixed_x, y_a, y_b, lam
 
+
 # --------------------------
 # Training / Validation
 # --------------------------
-def train_one_epoch(model, loader, criterion, optimizer, device, scaler, mixup_alpha=0.0, writer=None, epoch=0):
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    scaler,
+    mixup_alpha=0.0,
+    writer=None,
+    epoch=0,
+):
     model.train()
     running_loss = 0.0
     n = 0
     pbar = tqdm(loader, desc=f"Train E{epoch}")
     autocast_ctx = get_autocast_ctx(device)
+
     for batch_idx, (imgs, labels) in enumerate(pbar):
         imgs = imgs.to(device)
-        labels = labels.to(device).unsqueeze(1)  # shape Bx1
+        labels = labels.to(device).unsqueeze(1)  # [B, 1]
 
         optimizer.zero_grad()
+
         if mixup_alpha > 0:
             mixed_imgs, y_a, y_b, lam = mixup_data(imgs, labels, alpha=mixup_alpha)
             with autocast_ctx:
@@ -157,7 +189,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler, mixup_a
         running_loss += float(loss.item()) * imgs.size(0)
         n += imgs.size(0)
         pbar.set_postfix({'loss': running_loss / n})
+
     return running_loss / max(1, n)
+
 
 @torch.no_grad()
 def validate(model, loader, device):
@@ -166,6 +200,7 @@ def validate(model, loader, device):
     trues = []
     pbar = tqdm(loader, desc="Val")
     autocast_ctx = get_autocast_ctx(device)
+
     for imgs, labels in pbar:
         imgs = imgs.to(device)
         labels = labels.to(device).unsqueeze(1)
@@ -186,6 +221,7 @@ def validate(model, loader, device):
     cm = confusion_matrix(trues, pred_labels)
     return acc, auc, cm, preds, trues
 
+
 # --------------------------
 # TorchScript export
 # --------------------------
@@ -197,53 +233,59 @@ def export_torchscript(model, img_size, out_path="kfs_mobilenetv3_large_rpi.pt")
     traced.save(out_path)
     print(f"[OK] TorchScript saved -> {out_path}")
 
+
 # --------------------------
-# Model wrapper (safe)
+# Model wrapper
 # --------------------------
 class MobileNetWrapper(nn.Module):
-    """Wraps mobilenet backbone and adds a simple pooling + single-logit head."""
+    """Wraps MobileNetV3-Large backbone and adds a single-logit head."""
     def __init__(self, backbone: nn.Module, feat_channels: int):
         super().__init__()
         self.backbone = backbone
-        # We'll ignore backbone.classifier and use features -> pool -> linear
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(feat_channels, 1)
 
     def forward(self, x):
-        # backbone.features expects full input
         x = self.backbone.features(x)
-        x = self.pool(x)           # [B, C, 1, 1]
-        x = torch.flatten(x, 1)    # [B, C]
-        x = self.fc(x)             # [B, 1]
+        x = self.pool(x)          # [B, C, 1, 1]
+        x = torch.flatten(x, 1)   # [B, C]
+        x = self.fc(x)            # [B, 1]
         return x
 
+
 # --------------------------
-# Main
+# Main (hardcoded config)
 # --------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data', required=True, help='Dataset root (contains Real/ and Fake/)')
-    parser.add_argument('--img-size', type=int, default=224)
-    parser.add_argument('--batch-size', type=int, default=16)
-    parser.add_argument('--epochs', type=int, default=30)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--mixup', type=float, default=0.0, help='MixUp alpha (0 to disable)')
-    parser.add_argument('--num-workers', type=int, default=0)
-    parser.add_argument('--patience', type=int, default=6)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--save-dir', type=str, default='outputs')
-    args = parser.parse_args()
+    # ===== Hardcoded config =====
+    data_root = Path(
+        "D:/Robotics Club/Robocon2026/Team-Vulcans-Robocon-2026/teams/team-2_vision/DatasetIRL"
+    )
+    img_size = 224
+    batch_size = 16
+    epochs = 30
+    lr = 1e-4
+    mixup_alpha = 0.2       # set to 0.0 to disable MixUp
+    num_workers = 4
+    patience = 6            # early stopping patience (epochs)
+    seed = 42
+    save_dir = Path("outputs_mobilenetv3")
+    # ============================
 
-    seed_everything(args.seed)
-    save_dir = Path(args.save_dir)
+    seed_everything(seed)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    DATA = Path(args.data)
-    real_dir = DATA / "Real"
-    fake_dir = DATA / "Fake"
+    real_dir = data_root / "Real"
+    fake_dir = data_root / "Fake"
 
-    real_files = sorted([p for p in glob(str(real_dir / "**" / "*"), recursive=True) if p.lower().endswith(('.jpg', '.jpeg', '.png'))])
-    fake_files = sorted([p for p in glob(str(fake_dir / "**" / "*"), recursive=True) if p.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    real_files = sorted([
+        p for p in glob(str(real_dir / "**" / "*"), recursive=True)
+        if p.lower().endswith((".jpg", ".jpeg", ".png"))
+    ])
+    fake_files = sorted([
+        p for p in glob(str(fake_dir / "**" / "*"), recursive=True)
+        if p.lower().endswith((".jpg", ".jpeg", ".png"))
+    ])
 
     print(f"[INFO] Real images: {len(real_files)}  |  Fake images: {len(fake_files)}")
     files = real_files + fake_files
@@ -253,87 +295,133 @@ def main():
         print("ERROR: No images found. Check Real/ and Fake/ folders.")
         return
 
-    # stratified split (preserve class ratio)
-    train_files, val_files, train_labels, val_labels = train_test_split(files, labels, test_size=0.15, stratify=labels, random_state=args.seed)
-
+    # Stratified split (preserve class ratio)
+    train_files, val_files, train_labels, val_labels = train_test_split(
+        files,
+        labels,
+        test_size=0.15,
+        stratify=labels,
+        random_state=seed,
+    )
     print(f"[INFO] Train: {len(train_files)}  Val: {len(val_files)}")
 
-    train_ds = KFS_TorchDataset(train_files, train_labels, img_size=args.img_size, augment=True)
-    val_ds = KFS_TorchDataset(val_files, val_labels, img_size=args.img_size, augment=False)
+    train_ds = KFS_TorchDataset(train_files, train_labels, img_size=img_size, augment=True)
+    val_ds = KFS_TorchDataset(val_files, val_labels, img_size=img_size, augment=False)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=(args.num_workers>0))
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(args.num_workers>0))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=(num_workers > 0),
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(num_workers > 0),
+    )
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print("[INFO] Device:", device)
 
-    # load backbone
+    # Load backbone
     backbone = mobilenet_v3_large(weights="IMAGENET1K_V1")
     backbone.eval()
 
-    # infer feature channels by passing a dummy through backbone.features
+    # Infer feature channels by passing a dummy through backbone.features
     with torch.no_grad():
-        dummy = torch.randn(1, 3, args.img_size, args.img_size)
+        dummy = torch.randn(1, 3, img_size, img_size)
         feat = backbone.features(dummy)
         feat_dim = feat.shape[1]
     print("[INFO] Detected backbone feature channels:", feat_dim)
 
     model = MobileNetWrapper(backbone, feat_dim).to(device)
 
-    # loss / optimizer / scheduler
-    pos_weight = torch.tensor((len(labels) - sum(labels)) / (sum(labels) + 1e-6)).to(device)
+    # Loss / optimizer / scheduler
+    pos_weight = torch.tensor(
+        (len(labels) - sum(labels)) / (sum(labels) + 1e-6)
+    ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=2, factor=0.5)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", patience=2, factor=0.5
+    )
 
-    scaler = torch.amp.GradScaler(enabled=(device == 'cuda')) if torch.cuda.is_available() else None
+    scaler = torch.amp.GradScaler(enabled=(device == "cuda")) if torch.cuda.is_available() else None
 
-    writer = SummaryWriter(log_dir=str(save_dir / 'runs'))
+    writer = SummaryWriter(log_dir=str(save_dir / "runs"))
     best_auc = -1.0
     epochs_no_improve = 0
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, epochs + 1):
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, mixup_alpha=args.mixup, writer=writer, epoch=epoch)
-        val_acc, val_auc, val_cm, val_preds, val_trues = validate(model, val_loader, device)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            scaler,
+            mixup_alpha=mixup_alpha,
+            writer=writer,
+            epoch=epoch,
+        )
+        val_acc, val_auc, val_cm, val_preds, val_trues = validate(
+            model,
+            val_loader,
+            device,
+        )
 
         epoch_time = time.time() - t0
-        print(f"Epoch {epoch}/{args.epochs} — train_loss: {train_loss:.4f} | val_acc: {val_acc:.4f} | val_auc: {val_auc:.4f} | time: {epoch_time:.1f}s")
+        print(
+            f"Epoch {epoch}/{epochs} — "
+            f"train_loss: {train_loss:.4f} | "
+            f"val_acc: {val_acc:.4f} | "
+            f"val_auc: {val_auc:.4f} | "
+            f"time: {epoch_time:.1f}s"
+        )
         print("Confusion Matrix:\n", val_cm)
 
-        writer.add_scalar('train/loss', train_loss, epoch)
-        writer.add_scalar('val/acc', val_acc, epoch)
+        writer.add_scalar("train/loss", train_loss, epoch)
+        writer.add_scalar("val/acc", val_acc, epoch)
         if not math.isnan(val_auc):
-            writer.add_scalar('val/auc', val_auc, epoch)
+            writer.add_scalar("val/auc", val_auc, epoch)
 
         scheduler.step(val_auc if not math.isnan(val_auc) else 0.0)
 
-        # checkpointing by AUC
+        # Checkpointing by AUC
         if not math.isnan(val_auc) and val_auc > best_auc:
             best_auc = val_auc
             epochs_no_improve = 0
-            ckpt_path = save_dir / f'best_mobilenetv3_large_epoch{epoch}.pth'
+            ckpt_path = save_dir / f"best_mobilenetv3_large_epoch{epoch}.pth"
             torch.save(model.state_dict(), str(ckpt_path))
             print("[OK] Saved best checkpoint ->", ckpt_path)
         else:
             epochs_no_improve += 1
 
-        if epochs_no_improve >= args.patience:
-            print(f"[STOP] Early stopping triggered (no improvement for {args.patience} epochs).")
+        if epochs_no_improve >= patience:
+            print(f"[STOP] Early stopping triggered (no improvement for {patience} epochs).")
             break
 
-    # load best if exists
+    # Load best if exists
     ckpt_candidates = sorted(save_dir.glob("best_mobilenetv3_large_epoch*.pth"))
     if ckpt_candidates:
         best_ckpt = ckpt_candidates[-1]
         model.load_state_dict(torch.load(best_ckpt, map_location=device))
         print("[INFO] Loaded best checkpoint:", best_ckpt)
 
-    # export TorchScript
-    export_torchscript(model, args.img_size, out_path=str(save_dir / "kfs_mobilenetv3_large_rpi.pt"))
+    # Export TorchScript
+    export_torchscript(
+        model,
+        img_size,
+        out_path=str(save_dir / "kfs_mobilenetv3_large_rpi.pt"),
+    )
 
     writer.close()
     print("[DONE] Training & export complete. Outputs in:", save_dir)
+
 
 if __name__ == "__main__":
     main()
