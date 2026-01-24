@@ -24,7 +24,7 @@ IS_LINUX = platform.system().lower().startswith("linux")
 # -------------------- CONFIG --------------------
 
 CAMERA_INDEX = 0
-FRAME_W, FRAME_H = 640, 480
+FRAME_W, FRAME_H = 1280, 720  # 🔥 Increased from 640x480 for wider FOV
 TARGET_FPS = 30
 
 # Auto model path selection
@@ -39,7 +39,7 @@ MODEL_IMG_SIZE = (224, 224)
 # REAL scores: 0.10-0.50, FAKE scores: 0.50-0.80
 CONF_THRESHOLD = 0.50  # Lower = classify as REAL, Higher = classify as FAKE
 
-MIN_CONTOUR_AREA = 500
+MIN_CONTOUR_AREA = 1000  # 🔥 Increased for larger resolution
 
 # 🔥 REMOVED outer box expansion - allows partial detection
 OUTSET_PERCENT = 0.0  # Set to 0 to disable outer box
@@ -48,8 +48,9 @@ OUTSET_PERCENT = 0.0  # Set to 0 to disable outer box
 LOWER_BLUE = np.array([100, 100, 50])   # Blue hue range
 UPPER_BLUE = np.array([130, 255, 255])  # Covers cyan to deep blue
 
-# 🔥 Larger smoothing window for more stability
-SMOOTH_WINDOW = 10  # Increased from 5 to 10 for less flickering
+# 🔥 MAXIMUM stability settings
+SMOOTH_WINDOW = 20  # Increased from 10 to 20 for ultra-stable predictions
+MIN_CONFIDENCE_FRAMES = 8  # Must maintain classification for N frames before switching
 pred_buffer = deque(maxlen=SMOOTH_WINDOW)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -171,7 +172,11 @@ last_log_time = time.time()
 
 # 🔥 Hysteresis to prevent flickering
 last_label = "NONE"
-HYSTERESIS_MARGIN = 0.05  # Require 5% score change to switch labels
+HYSTERESIS_MARGIN = 0.10  # 🔥 Increased from 0.05 to 0.10 for more stability
+
+# 🔥 Confidence frame counter for label locking
+label_confidence_counter = 0
+pending_label = None
 
 print("[INFO] System running. Press 'q' to quit.")
 if IS_WINDOWS:
@@ -231,6 +236,8 @@ try:
         if not contours:
             pred_buffer.clear()
             last_label = "NONE"  # Reset hysteresis state
+            label_confidence_counter = 0
+            pending_label = None
 
         if contours:
             largest = max(contours, key=cv2.contourArea)
@@ -246,8 +253,9 @@ try:
                 roi = frame[y1:y2, x1:x2]
                 roi_area = roi.shape[0] * roi.shape[1]
 
-                # 🔥 Lower ROI size requirement for partial detection
-                if roi.size > 0 and roi_area > 2000:
+                # 🔥 Adaptive ROI size requirement based on resolution
+                min_roi_area = int((FRAME_W * FRAME_H) * 0.001)  # 0.1% of frame size
+                if roi.size > 0 and roi_area > min_roi_area:
                     # Preprocess and infer
                     img = preprocess(roi).unsqueeze(0).to(DEVICE)
 
@@ -260,18 +268,38 @@ try:
                     pred_buffer.append(score)
                     smooth_score = sum(pred_buffer) / len(pred_buffer)
 
-                    # 🔥 Hysteresis: prevent flickering near threshold
+                    # 🔥 Enhanced hysteresis with confidence frame locking
+                    # Determine what label the score suggests
                     if last_label == "REAL":
-                        # If currently REAL, need score > threshold + margin to switch to FAKE
-                        detected_label = "FAKE" if smooth_score > (CONF_THRESHOLD + HYSTERESIS_MARGIN) else "REAL"
+                        suggested_label = "FAKE" if smooth_score > (CONF_THRESHOLD + HYSTERESIS_MARGIN) else "REAL"
                     elif last_label == "FAKE":
-                        # If currently FAKE, need score < threshold - margin to switch to REAL
-                        detected_label = "REAL" if smooth_score < (CONF_THRESHOLD - HYSTERESIS_MARGIN) else "FAKE"
+                        suggested_label = "REAL" if smooth_score < (CONF_THRESHOLD - HYSTERESIS_MARGIN) else "FAKE"
                     else:
-                        # First detection, use standard threshold
-                        detected_label = "REAL" if smooth_score < CONF_THRESHOLD else "FAKE"
+                        suggested_label = "REAL" if smooth_score < CONF_THRESHOLD else "FAKE"
                     
-                    last_label = detected_label
+                    # 🔥 Label locking: only switch after N consistent frames
+                    if suggested_label != last_label:
+                        if pending_label == suggested_label:
+                            label_confidence_counter += 1
+                            if label_confidence_counter >= MIN_CONFIDENCE_FRAMES:
+                                # Switch confirmed after N frames
+                                detected_label = suggested_label
+                                last_label = suggested_label
+                                label_confidence_counter = 0
+                                pending_label = None
+                            else:
+                                # Keep old label while building confidence
+                                detected_label = last_label
+                        else:
+                            # New suggestion, start counting
+                            pending_label = suggested_label
+                            label_confidence_counter = 1
+                            detected_label = last_label
+                    else:
+                        # Suggestion matches current label
+                        detected_label = last_label
+                        label_confidence_counter = 0
+                        pending_label = None
 
                     # Draw only the tight bounding box (no outer box)
                     if GUI_AVAILABLE:
@@ -293,10 +321,14 @@ try:
         # Display GUI (Windows only)
         if GUI_AVAILABLE and frame_count >= 5:
             try:
-                # Add overlay text
+                # Add overlay text with confidence counter
+                status_text = f"{detected_label}"
+                if pending_label and label_confidence_counter > 0:
+                    status_text += f" -> {pending_label} ({label_confidence_counter}/{MIN_CONFIDENCE_FRAMES})"
+                
                 cv2.putText(
                     frame,
-                    f"{detected_label} | Confidence: {smooth_score:.2f}",
+                    status_text,
                     (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -305,10 +337,19 @@ try:
                 )
                 cv2.putText(
                     frame,
-                    f"FPS: {fps_display}",
+                    f"Confidence: {smooth_score:.3f}",
                     (20, 80),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+                cv2.putText(
+                    frame,
+                    f"FPS: {fps_display}",
+                    (20, 115),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
                     (0, 255, 0),
                     2
                 )
