@@ -29,7 +29,7 @@ TARGET_FPS = 30
 
 # Auto model path selection
 if IS_WINDOWS:
-    MODEL_PATH = r"D:\Robotics Club\Robocon2026\Team-Vulcans-Robocon-2026\teams\team-2_vision\KFS_Detection\outputs\kfs_mobilenetv3_large_rpi.pt"
+    MODEL_PATH = r"D:\\Robotics Club\\Robocon2026\\outputs_mobilenetv3\\kfs_mobilenetv3_large_rpi.pt"
 else:
     MODEL_PATH = "/workspace/Robocon/kfs_mobilenetv3_large_rpi.pt"
 

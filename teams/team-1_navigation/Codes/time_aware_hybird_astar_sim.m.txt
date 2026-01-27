@@ -1,0 +1,677 @@
+function time_aware_hybrid_astar_improved
+clc; 
+close all;
+
+%% ================= PARAMETERS =================
+ROWS = 4; COLS = 3;
+CAPACITY = 2;
+
+% Dynamic weights based on carry count
+ALPHA0 = 3.0;     % block weight when empty (prioritize nearby R2)
+BETA0  = 0.5;     % exit weight when empty (don't care about exit)
+ALPHA1 = 0.5;     % block weight when full (don't prioritize R2)
+BETA1  = 3.0;     % exit weight when full (prioritize exit strongly)
+
+WAIT_TIME = 5;
+R1_CLEAR_PROB = 0.8;
+
+exitCells = [4 1; 4 3];
+startPos  = [1 2];
+TEAM = "RED";
+
+% Visual pause times
+PAUSE_MOVE = 0.5;
+PAUSE_PICK = 0.5;
+PAUSE_WAIT = 0.8;
+PAUSE_SENSE = 0.3;
+
+STEP_DELAY = 1.5;   % seconds per logical step (tune this)
+
+% Time costs (from rulebook physics)
+T_UP   = 1.0;   % per 20mm height increase
+T_DOWN = 2.0;   % per 20mm height decrease
+T_PICK = 0.5;   % picking time
+
+% Strategic costs
+R1_WAIT_EXPECTED = WAIT_TIME / R1_CLEAR_PROB;   
+R2_EXIT_PENALTY = 5.0 * R1_WAIT_EXPECTED;  % Strongly avoid R2 when exiting
+R1_SOFT_PENALTY = 0.2 * R1_WAIT_EXPECTED;  % Small penalty for R1 in collect mode
+
+%% ================= HEIGHT MAP =================
+heightMap = [40 20 40;
+             20 40 60;
+             40 60 40;
+             20 40 20];
+
+color20 = [41 82 16]/255;
+color40 = [42 113 56]/255;
+color60 = [152 166 80]/255;
+
+%% ================= TRUE FOREST =================
+trueForest = strings(ROWS,COLS);
+trueForest(:) = "EMPTY";
+
+%% ================= TEAM MIRRORING =================
+if TEAM == "BLUE"
+    trueForest = trueForest(:, end:-1:1);
+    heightMap = heightMap(:, end:-1:1);
+    exitCells(:,2) = COLS - exitCells(:,2) + 1;
+    startPos(2) = COLS - startPos(2) + 1;
+end
+
+% Precompute height colors
+heightColor = zeros(ROWS,COLS,3);
+for r=1:ROWS
+    for c=1:COLS
+        if heightMap(r,c)==20
+            heightColor(r,c,:) = color20;
+        elseif heightMap(r,c)==40
+            heightColor(r,c,:) = color40;
+        else
+            heightColor(r,c,:) = color60;
+        end
+    end
+end
+
+%% ================= R1 PLACEMENT (BOUNDARY) =================
+boundary = [];
+for c = 1:COLS
+    boundary = [boundary; 1 c; ROWS c];
+end
+for r = 2:ROWS-1
+    boundary = [boundary; r 1; r COLS];
+end
+boundary = unique(boundary,'rows');
+boundary(boundary(:,1)==startPos(1) & boundary(:,2)==startPos(2), :) = [];
+
+if size(boundary,1) < 3
+    error("Not enough boundary cells for R1 placement");
+end
+
+r1idx = randperm(size(boundary,1),3);
+r1pos = boundary(r1idx,:);
+for i = 1:3
+    trueForest(r1pos(i,1), r1pos(i,2)) = "R1";
+end
+
+%% ================= R2 and FAKE PLACEMENT =================
+validIdx = find(trueForest=="EMPTY");
+startLinear = sub2ind(size(trueForest),startPos(1),startPos(2));
+validIdx(validIdx==startLinear) = [];
+
+% Place FAKE (not in entrance blocks 1,2,3)
+fakeValid = validIdx;
+for i = 1:3
+    entryLinear = sub2ind(size(trueForest), 1, i);
+    fakeValid(fakeValid == entryLinear) = [];
+end
+trueForest(fakeValid(randi(numel(fakeValid)))) = "FAKE";
+
+% Place 4 R2s
+idx = find(trueForest=="EMPTY");
+idx = idx(randperm(numel(idx),4));
+trueForest(idx) = "R2";
+
+fprintf("===== TRUE FOREST (GROUND TRUTH) =====\n");
+disp(trueForest);
+
+%% ================= ROBOT STATE =================
+pos = startPos;
+carry = 0;
+mode = "COLLECT";
+pathHist = pos;
+pickedR2 = [];   % Nx2 list of collected R2 positions
+
+% Belief map: what robot knows about the world
+belief = strings(ROWS,COLS);
+belief(:) = "UNSEEN";
+
+% R1 wait tracking
+r1WaitStart = containers.Map;
+
+%% ================= FIGURE =================
+figure('Color',[0.1 0.1 0.1]);
+
+%% ================= MAIN LOOP =================
+while true
+    %% ---- UPDATE PERCEPTION ----
+    % R2 can see 3 rows ahead + current row (based on your description)
+    belief = updatePerception(pos, trueForest, belief);
+    
+    fprintf("\n===== ROBOT BELIEF (Row %d, Col %d, Carry=%d) =====\n", pos(1), pos(2), carry);
+    disp(belief);
+    
+    drawArena();
+    pause(STEP_DELAY);
+    pause(PAUSE_SENSE);
+
+    %% ---- EXIT CHECK ----
+    if mode=="EXIT" && ismember(pos, exitCells, 'rows')
+        fprintf("\n🎯 REACHED EXIT at (%d,%d)\n", pos);
+        break;
+    end
+
+    %% ---- IMMEDIATE PICK (current cell) ----
+    if belief(pos(1), pos(2)) == "R2"
+        carry = carry + 1;
+        trueForest(pos(1), pos(2)) = "EMPTY";
+        belief(pos(1), pos(2)) = "EMPTY";
+        fprintf("📦 PICK at (%d,%d), Carry=%d\n", pos, carry);
+        pickedR2(end+1,:) = pos;
+        drawArena(); 
+        pause(STEP_DELAY);
+        pause(PAUSE_PICK);
+
+        if carry >= CAPACITY
+            mode = "EXIT";
+            fprintf("✅ CAPACITY FULL → EXIT MODE\n");
+        end
+        continue;
+    end
+
+    %% ---- MODE DECISION & TARGET SELECTION ----
+    target = [];
+    
+    if mode == "COLLECT"
+        % Check for adjacent R2 first (opportunistic picking)
+        adjTarget = findAdjacentR2(pos, belief);
+        if ~isempty(adjTarget)
+            target = adjTarget;
+            fprintf("🎯 Adjacent R2 found at (%d,%d)\n", target);
+        else
+            % Plan to best R2 using hybrid cost
+            target = chooseBestR2(pos, belief, carry, heightMap, exitCells);
+            
+            if isempty(target)
+                % No R2 visible - explore unknown regions
+                target = findBestExploreCell(pos, belief, heightMap);
+                
+                if isempty(target)
+                    fprintf("⚠️ NO R2 AND NO UNKNOWN → EXIT MODE\n");
+                    mode = "EXIT";
+                    continue;
+                end
+                fprintf("🔍 Exploring unknown at (%d,%d)\n", target);
+            else
+                fprintf("🎯 Target R2 at (%d,%d)\n", target);
+            end
+        end
+        
+    elseif mode == "EXIT"
+        % Plan optimal exit path using A*
+        [target, blockedR1] = planExitRoute(pos, belief, exitCells, heightMap);
+        
+        if isempty(target) && ~isempty(blockedR1)
+            % Exit blocked by R1 - wait
+            r1key = sprintf('%d,%d', blockedR1(1), blockedR1(2));
+            
+            if ~isKey(r1WaitStart, r1key)
+                r1WaitStart(r1key) = tic;
+                fprintf("🚧 EXIT BLOCKED by R1 at (%d,%d) → WAITING\n", blockedR1);
+            end
+            
+            mode = "WAIT_FOR_EXIT";
+            continue;
+            
+        elseif isempty(target)
+            fprintf("❌ NO VALID EXIT PATH\n");
+            break;
+        else
+            fprintf("🚪 Exit route via (%d,%d)\n", target);
+        end
+        
+    elseif mode == "WAIT_FOR_EXIT"
+        % Handle R1 clearing
+        keys = r1WaitStart.keys;
+        if isempty(keys)
+            mode = "EXIT";
+            continue;
+        end
+        
+        k = keys{1};
+        elapsed = toc(r1WaitStart(k));
+        
+        if elapsed >= WAIT_TIME
+            if rand <= R1_CLEAR_PROB
+                rc = sscanf(k, '%d,%d');
+                trueForest(rc(1), rc(2)) = "EMPTY";
+                belief(rc(1), rc(2)) = "EMPTY";
+                remove(r1WaitStart, k);
+                fprintf("✅ R1 CLEARED at (%d,%d)\n", rc);
+                mode = "EXIT";
+                continue;
+            else
+                r1WaitStart(k) = tic;
+                fprintf("⏳ R1 NOT CLEARED → RETRY WAIT\n");
+            end
+        else
+            fprintf("⏱️ WAITING FOR R1 (%.1fs / %ds)\n", elapsed, WAIT_TIME);
+        end
+        
+        drawArena(); 
+        pause(STEP_DELAY);
+        pause(PAUSE_WAIT);
+        continue;
+    end
+
+    %% ---- MOVE TO TARGET ----
+    if ~isempty(target)
+        path = astarWithTerrain(pos, target, belief, heightMap, mode);
+        
+        if isempty(path) || size(path, 1) < 2
+            fprintf("⚠️ NO PATH TO TARGET - RETRY\n");
+            continue;
+        end
+        
+        nextPos = path(2, :);
+        
+        % Execute move
+        pos = nextPos;
+        pathHist(end+1, :) = pos;
+        fprintf("➡️ MOVE to (%d,%d)\n", pos);
+        drawArena(); 
+        pause(PAUSE_MOVE);
+    end
+end
+
+fprintf("\n🏁 FINAL PATH:\n");
+disp(pathHist);
+
+%% ================= HELPER FUNCTIONS =================
+
+    function newBelief = updatePerception(robotPos, truth, oldBelief)
+        % R2 sees: current row + 3 rows ahead (based on camera specs)
+        newBelief = oldBelief;
+        
+        for r = 1:ROWS
+            for c = 1:COLS
+                % See current and next 2 rows clearly
+                if r <= robotPos(1) + 2
+                    newBelief(r, c) = truth(r, c);
+                % Row 3 ahead: mark as UNKNOWN if unseen
+                elseif r == robotPos(1) + 3 && newBelief(r, c) == "UNSEEN"
+                    newBelief(r, c) = "UNKNOWN";
+                end
+            end
+        end
+    end
+
+    function adjR2 = findAdjacentR2(p, b)
+        % Find R2 in adjacent cells (opportunistic picking)
+        adjR2 = [];
+        neighbors = getNeighbors(p);
+        
+        for i = 1:size(neighbors, 1)
+            nr = neighbors(i, 1);
+            nc = neighbors(i, 2);
+            if b(nr, nc) == "R2"
+                adjR2 = [nr nc];
+                return;
+            end
+        end
+    end
+
+    function target = chooseBestR2(p, b, carryCount, hMap, exits)
+        % Choose best R2 using hybrid cost: distance to R2 + distance to exit
+        % Weights change based on carry count
+        
+        alpha = interpWeight(carryCount, ALPHA0, ALPHA1);
+        beta = interpWeight(carryCount, BETA0, BETA1);
+        
+        bestCost = inf;
+        target = [];
+        
+        for r = 1:ROWS
+            for c = 1:COLS
+                if b(r, c) ~= "R2"
+                    continue;
+                end
+                
+                % Cost to reach this R2 (considering terrain)
+                costToR2 = estimateTerrainCost(p, [r c], hMap);
+                
+                % Cost from R2 to nearest exit
+                costToExit = min(...
+                    estimateTerrainCost([r c], exits(1,:), hMap), ...
+                    estimateTerrainCost([r c], exits(2,:), hMap));
+                
+                % Hybrid cost
+                totalCost = alpha * costToR2 + beta * costToExit;
+                
+                if totalCost < bestCost
+                    bestCost = totalCost;
+                    target = [r c];
+                end
+            end
+        end
+    end
+
+    function target = findBestExploreCell(p, b, hMap)
+        % Find best cell to explore (UNKNOWN or UNSEEN)
+        % Prioritize: nearby, forward motion, lower height
+        
+        bestCost = inf;
+        target = [];
+        
+        for r = 1:ROWS
+            for c = 1:COLS
+                if b(r, c) ~= "UNKNOWN" && b(r, c) ~= "UNSEEN"
+                    continue;
+                end
+                
+                % Distance cost
+                dist = abs(p(1) - r) + abs(p(2) - c);
+                
+                % Forward motion bonus (encourage moving down rows)
+                forwardBonus = (r > p(1)) * -3.0;
+                
+                % Height penalty (prefer exploring lower areas first)
+                heightPenalty = hMap(r, c) / 20.0;
+                
+                cost = dist + forwardBonus + heightPenalty;
+                
+                if cost < bestCost
+                    bestCost = cost;
+                    target = [r c];
+                end
+            end
+        end
+    end
+
+    function [target, blockedR1] = planExitRoute(p, b, exits, hMap)
+        % Plan optimal path to exit using A*
+        target = [];
+        blockedR1 = [];
+        
+        bestPath = [];
+        bestCost = inf;
+        bestExit = [];
+        
+        % Try both exits and choose better one
+        for i = 1:size(exits, 1)
+            exitGoal = exits(i, :);
+            path = astarWithTerrain(p, exitGoal, b, hMap, "EXIT");
+            
+            if ~isempty(path)
+                pathCost = computePathCost(path, hMap);
+                if pathCost < bestCost
+                    bestCost = pathCost;
+                    bestPath = path;
+                    bestExit = exitGoal;
+                end
+            end
+        end
+        
+        if ~isempty(bestPath)
+            % Return next waypoint
+            target = bestPath(min(2, size(bestPath,1)), :);
+            return;
+        end
+        
+        % No path found - check if exit itself is blocked by R1
+        for i = 1:size(exits, 1)
+            e = exits(i, :);
+            if b(e(1), e(2)) == "R1"
+                blockedR1 = e;
+                return;
+            end
+        end
+    end
+
+    function cost = estimateTerrainCost(from, to, hMap)
+        % Heuristic: Manhattan distance + height change penalty
+        manhattan = abs(from(1) - to(1)) + abs(from(2) - to(2));
+        
+        % Estimate average height change cost
+        h1 = hMap(from(1), from(2));
+        h2 = hMap(to(1), to(2));
+        dh = h2 - h1;
+        
+        if dh > 0
+            heightCost = (dh / 20) * T_UP;
+        elseif dh < 0
+            heightCost = (abs(dh) / 20) * T_DOWN;
+        else
+            heightCost = 0;
+        end
+        
+        cost = manhattan + heightCost;
+    end
+
+    function cost = computePathCost(path, hMap)
+        % Compute actual cost of a path
+        cost = 0;
+        for i = 1:size(path, 1)-1
+            cur = path(i, :);
+            nxt = path(i+1, :);
+            cost = cost + moveCost(cur, nxt, hMap);
+        end
+    end
+
+    function c = moveCost(cur, nxt, hMap)
+        % Actual movement cost between adjacent cells
+        h1 = hMap(cur(1), cur(2));
+        h2 = hMap(nxt(1), nxt(2));
+        dh = h2 - h1;
+        
+        if dh > 0
+            c = (dh / 20) * T_UP;
+        elseif dh < 0
+            c = (abs(dh) / 20) * T_DOWN;
+        else
+            c = 1.0;  % Flat movement baseline
+        end
+    end
+
+    function path = astarWithTerrain(start, goal, b, hMap, currentMode)
+        % A* with terrain-aware costs
+        open = start;
+        cameFrom = containers.Map;
+        gScore = inf(ROWS, COLS);
+        gScore(start(1), start(2)) = 0;
+        fScore = gScore;
+        fScore(start(1), start(2)) = estimateTerrainCost(start, goal, hMap);
+        
+        while ~isempty(open)
+            % Find node with lowest fScore
+            [~, idx] = min(arrayfun(@(k) fScore(open(k,1), open(k,2)), 1:size(open,1)));
+            current = open(idx, :);
+            open(idx, :) = [];
+            
+            if isequal(current, goal)
+                path = reconstructPath(cameFrom, current);
+                return;
+            end
+            
+            neighbors = getNeighbors(current);
+            for i = 1:size(neighbors, 1)
+                neighbor = neighbors(i, :);
+                cellType = b(neighbor(1), neighbor(2));
+                
+                % Apply mode-specific penalties
+                extraCost = 0;
+                
+                % Can't move through FAKE
+                if cellType == "FAKE"
+                    continue;
+                end
+                
+                % Can't move onto cell with KFS (rule 8.10)
+                if cellType == "R2" && ~isequal(neighbor, goal)
+                    continue;
+                end
+                
+                % Mode-specific costs
+                if currentMode == "EXIT"
+                    if cellType == "R1"
+                        extraCost = 0.15 * R1_WAIT_EXPECTED;
+                    elseif cellType == "R2"
+                        extraCost = R2_EXIT_PENALTY;
+                    end
+                elseif currentMode == "COLLECT"
+                    if cellType == "R1"
+                        extraCost = R1_SOFT_PENALTY;
+                    end
+                end
+                
+                % Add pick cost if moving to R2 (and it's the goal)
+                pickCost = 0;
+                if cellType == "R2" && isequal(neighbor, goal)
+                    pickCost = T_PICK;
+                end
+                
+                tentativeG = gScore(current(1), current(2)) + ...
+                             moveCost(current, neighbor, hMap) + ...
+                             extraCost + pickCost;
+                
+                if tentativeG < gScore(neighbor(1), neighbor(2))
+                    cameFrom(key(neighbor)) = current;
+                    gScore(neighbor(1), neighbor(2)) = tentativeG;
+                    fScore(neighbor(1), neighbor(2)) = tentativeG + ...
+                        estimateTerrainCost(neighbor, goal, hMap);
+                    
+                    if ~ismember(neighbor, open, 'rows')
+                        open = [open; neighbor];
+                    end
+                end
+            end
+        end
+        
+        path = [];  % No path found
+    end
+
+    function path = reconstructPath(cameFrom, current)
+        path = current;
+        while isKey(cameFrom, key(current))
+            current = cameFrom(key(current));
+            path = [current; path];
+        end
+    end
+
+    function w = interpWeight(carry, w0, wFull)
+        % Interpolate weight based on carry count
+        if carry == 0
+            w = w0;
+        elseif carry >= CAPACITY
+            w = wFull;
+        else
+            w = w0 + (wFull - w0) * (carry / CAPACITY);
+        end
+    end
+
+    function n = getNeighbors(p)
+        % Get valid neighbors (4-connected grid)
+        directions = [-1 0; 1 0; 0 -1; 0 1];
+        n = [];
+        for k = 1:4
+            r = p(1) + directions(k, 1);
+            c = p(2) + directions(k, 2);
+            if r >= 1 && r <= ROWS && c >= 1 && c <= COLS
+                n = [n; r c];
+            end
+        end
+    end
+
+    function k = key(p)
+        k = sprintf('%d,%d', p(1), p(2));
+    end
+
+%% ================= VISUALIZATION =================
+    function drawArena()
+        cla;
+        
+        imshow(heightColor, 'XData', [0.5, COLS-0.5], 'YData', [0.5, ROWS-0.5]);
+        axis ij equal;
+        axis([0 COLS 0 ROWS]);
+        hold on;
+        
+        % Draw grid and labels
+        for r = 1:ROWS
+            for c = 1:COLS
+                rectangle('Position', [c-1 r-1 1 1], 'EdgeColor', 'k');
+                
+                t = belief(r, c);
+                if t == "R2"
+                    txt = "R";
+                    col=[1.0 0.9 0.3];
+                elseif t == "R1"
+                    txt = "R1";
+                    col = [1.0 0.4 0.2];
+                elseif t == "FAKE"
+                    txt = "F";
+                    col=[0.7 0.3 0.7];
+                elseif t == "UNKNOWN"
+                    txt = "?";
+                    col = [0.7 0.7 0.7];
+                elseif t == "UNSEEN"
+                    txt = "?";
+                    col = [0.5 0.5 0.5];
+                else
+                    txt = "";
+                    col = 'w';
+                end
+                
+                if txt ~= ""
+                    text(c-0.5, r-0.5, txt, ...
+                        'Color', col, ...
+                        'FontSize', 14, ...
+                        'FontWeight', 'bold', ...
+                        'HorizontalAlignment', 'center', ...
+                        'VerticalAlignment', 'middle');
+                end
+                
+                % Show height
+                text(c-0.9, r-0.9, sprintf('%d', heightMap(r,c)), ...
+                    'Color', 'w', 'FontSize', 8);
+            end
+        end
+        
+        % ---- DRAW FULL TRAJECTORY ----
+        if size(pathHist,1) > 1
+            plot(pathHist(:,2)-0.5, ...
+                pathHist(:,1)-0.5, ...
+                'b-', 'LineWidth', 2);
+        end
+
+        % ---- LAST STEP HIGHLIGHT ----
+        if size(pathHist,1) > 1
+            prev = pathHist(end-1,:);
+            curr = pathHist(end,:);
+            plot([prev(2)-0.5, curr(2)-0.5], ...
+                [prev(1)-0.5, curr(1)-0.5], ...
+                'c-', 'LineWidth', 3);   % thicker, cyan
+        end
+        
+        % ---- DRAW PICKED-UP R2 (GREEN CROSSES) ----
+        if ~isempty(pickedR2)
+            scatter(pickedR2(:,2)-0.5, pickedR2(:,1)-0.5, ...
+                120, 'g', 'x', 'LineWidth', 3);
+        end
+
+        % ---- DRAW MOTION ARROWS ----
+        if size(pathHist,1) > 1
+            for i = 1:size(pathHist,1)-1
+                p1 = pathHist(i,:);
+                p2 = pathHist(i+1,:);
+                quiver(p1(2)-0.5, p1(1)-0.5, ...
+                    p2(2)-p1(2), p2(1)-p1(1), ...
+                    0, ...              % no autoscaling
+                    'Color', [0 0.8 1], ... % cyan-blue
+                    'LineWidth', 1.5, ...
+                    'MaxHeadSize', 0.5);
+            end
+        end
+
+        % Draw current position
+        scatter(pos(2)-0.5, pos(1)-0.5, ...
+            220, [0.9 0.1 0.1], 'filled', ...
+            'MarkerEdgeColor', 'w', 'LineWidth', 2);
+
+        % Mode indicator
+        title(sprintf('Mode: %s | Carry: %d/%d', mode, carry, CAPACITY), ...
+            'Color', 'w', 'FontSize', 12);
+        
+        drawnow;
+    end
+
+end
