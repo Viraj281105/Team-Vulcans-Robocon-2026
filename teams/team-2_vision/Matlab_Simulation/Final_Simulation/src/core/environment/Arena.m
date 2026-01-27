@@ -143,7 +143,7 @@ classdef Arena < handle
                 end
             end
             
-            % Assign color (shared)
+            % Assign color - FIXED: R1 is WHITE, R2/FAKE share red or blue
             if rand < 0.5
                 obj.globalKfsColor = cfg.COLOR_KFS_RED;
             else
@@ -152,7 +152,12 @@ classdef Arena < handle
             
             obj.kfsColors = cell(1, numel(obj.kfsIds));
             for k = 1:numel(obj.kfsIds)
-                obj.kfsColors{k} = obj.globalKfsColor;
+                % CRITICAL FIX: R1 scrolls are ALWAYS WHITE
+                if obj.kfsTypes(k) == "R1"
+                    obj.kfsColors{k} = cfg.COLOR_KFS_WHITE;
+                else
+                    obj.kfsColors{k} = obj.globalKfsColor;
+                end
             end
             
             fprintf('[RANDOMIZER] New layout | R2 at: %s | R1 at: %s | Fake at: %s\n', ...
@@ -164,8 +169,42 @@ classdef Arena < handle
         end
         
         function block = getInitialBlock(obj)
-            block = obj.blocks(obj.config.initialBlockId);
+            % Return starting position
+            % FIXED: Handle special case for ground start (initialBlockId = -1)
+            
+            if obj.config.initialBlockId == -1
+                % Robot starts on GROUND before forest entrance
+                % Calculate optimal viewing position for first row
+                
+                cfg = obj.config;
+                
+                % First row center Y position
+                firstRowY = obj.forestMinY + (0.5 * cfg.BLOCK_SIZE);
+                
+                % Optimal viewing distance (to see all 3 blocks in first row clearly)
+                % With FOV_H = 100°, at 1500mm distance can see ~3600mm width
+                viewingDistance = 1500;  % mm
+                
+                block.id = -1;
+                block.row = 0;  % Special: not in grid
+                block.col = 2;  % Aligned with middle column
+                block.x = obj.forestMinX + (1.5 * cfg.BLOCK_SIZE);  % Center X
+                block.y = firstRowY - viewingDistance;  % Before forest
+                block.h = 0;  % Ground level
+                
+                fprintf('[ARENA] Robot starting on GROUND at (%.0f, %.0f)\n', block.x, block.y);
+                fprintf('[ARENA] First row at Y=%.0fmm | Forest starts at Y=%.0fmm\n', ...
+                    firstRowY, obj.forestMinY);
+                fprintf('[ARENA] Viewing distance: %.0fmm | Can see all 3 blocks in row 1\n', ...
+                    viewingDistance);
+            else
+                % Normal case: start on a specific block
+                block = obj.blocks(obj.config.initialBlockId);
+                fprintf('[ARENA] Robot starting on BLOCK %d at (%.0f, %.0f)\n', ...
+                    block.id, block.x, block.y);
+            end
         end
+
         
         function hMap = getHeightMap(obj)
             % Return height map in grid units (20/40/60)

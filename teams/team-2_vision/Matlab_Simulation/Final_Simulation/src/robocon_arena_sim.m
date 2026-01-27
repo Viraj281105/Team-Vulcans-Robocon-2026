@@ -41,6 +41,19 @@ while ui.isRunning()
     % Update vision detections
     detections = vision.processFrame(robot.getState(), arena);
     
+    % CRITICAL FIX: Always update navigator belief from vision
+    % This ensures the HUD shows correct detected counts in real-time
+    navigator.updateBeliefFromDetections(vision, arena);
+    
+    % Also update belief from current camera view
+    robotState = robot.getState();
+    cameraPos = robotState.position + [0 0 config.CAMERA_HEIGHT_OFFSET];
+    cameraYaw = robot.cameraYaw;
+    cameraPitch = robot.cameraPitch;
+    
+    [navigator.belief, navigator.beliefConfidence] = vision.updateGridBelief(...
+        cameraPos, cameraYaw, cameraPitch, navigator.belief, navigator.beliefConfidence);
+    
     % Update navigation if autonomous
     if ui.isAutonomousMode()
         navigator.step(robot, arena, vision, detections);

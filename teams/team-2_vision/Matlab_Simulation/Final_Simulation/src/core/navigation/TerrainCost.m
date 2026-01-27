@@ -1,13 +1,21 @@
 classdef TerrainCost
     % TERRAINCOST Utility for calculating terrain-based movement costs
+    % FIXED: Handles positions outside grid bounds (ground start)
     
     methods (Static)
         function cost = estimate(from, to, hMap, config)
             % Estimate terrain cost using Manhattan distance + height change
+            % Handles ground start positions outside grid
+            
             manhattan = abs(from(1) - to(1)) + abs(from(2) - to(2));
             
-            h1 = hMap(from(1), from(2));
-            h2 = hMap(to(1), to(2));
+            % Check if positions are within hMap bounds
+            [rows, cols] = size(hMap);
+            
+            % Get heights (default to 0 if outside bounds)
+            h1 = TerrainCost.getHeight(from, hMap, rows, cols);
+            h2 = TerrainCost.getHeight(to, hMap, rows, cols);
+            
             dh = h2 - h1;
             
             if dh > 0
@@ -33,8 +41,14 @@ classdef TerrainCost
         
         function c = move(cur, nxt, hMap, config)
             % Calculate cost of moving from cur to nxt cell
-            h1 = hMap(cur(1), cur(2));
-            h2 = hMap(nxt(1), nxt(2));
+            % Handles ground start positions outside grid
+            
+            [rows, cols] = size(hMap);
+            
+            % Get heights (default to 0 if outside bounds)
+            h1 = TerrainCost.getHeight(cur, hMap, rows, cols);
+            h2 = TerrainCost.getHeight(nxt, hMap, rows, cols);
+            
             dh = h2 - h1;
             
             if dh > 0
@@ -43,6 +57,15 @@ classdef TerrainCost
                 c = (abs(dh) / 20) * config.T_DOWN;
             else
                 c = 1.0;  % Flat movement
+            end
+        end
+        
+        function h = getHeight(pos, hMap, rows, cols)
+            % NEW: Helper to safely get height with bounds checking
+            if pos(1) >= 1 && pos(1) <= rows && pos(2) >= 1 && pos(2) <= cols
+                h = hMap(pos(1), pos(2));
+            else
+                h = 0;  % Ground level (outside forest)
             end
         end
     end

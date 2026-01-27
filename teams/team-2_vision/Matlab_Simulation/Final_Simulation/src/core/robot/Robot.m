@@ -8,15 +8,19 @@ classdef Robot < handle
         position        % [x, y, z] in mm
         yaw             % degrees
         
+        % NEW: Camera control
+        cameraYaw       % Camera yaw angle (degrees)
+        cameraPitch     % Camera pitch angle (degrees)
+        
         % Grid state
         currentBlockId
         gridPos         % [row, col]
         
-        % Path tracking
+        % Path tracking (MISSING in your version)
         pathHistory     % 3D position history
         recordingPath   % boolean
         
-        % Stats
+        % Stats (MISSING in your version)
         totalDistance
         lastPosition
     end
@@ -27,6 +31,8 @@ classdef Robot < handle
             obj.currentBlockId = initialBlock.id;
             obj.position = [initialBlock.x, initialBlock.y, 0];
             obj.yaw = 180;
+            obj.cameraYaw = 180;      % NEW: Initialize camera yaw
+            obj.cameraPitch = 15;     % NEW: Initialize camera pitch (looking slightly down)
             obj.gridPos = [initialBlock.row, initialBlock.col];
             obj.pathHistory = [];
             obj.recordingPath = false;
@@ -183,6 +189,8 @@ classdef Robot < handle
             obj.currentBlockId = initialBlock.id;
             obj.position = [initialBlock.x, initialBlock.y, 0];
             obj.yaw = 0;
+            obj.cameraYaw = 0;        % NEW: Reset camera yaw
+            obj.cameraPitch = 15;     % NEW: Reset camera pitch
             obj.gridPos = [initialBlock.row, initialBlock.col];
             obj.pathHistory = [];
             obj.totalDistance = 0;

@@ -43,8 +43,7 @@ classdef NavigationPlanner
         end
         
         function target = findBestExploreCell(pos, belief, conf, hMap, visited, config)
-            % Explore UNKNOWN/UNSEEN cells with smarter prioritization
-            % Prioritize: 1) Nearby cells 2) Lower terrain 3) Forward direction
+            % Explore UNKNOWN/UNSEEN cells ROW-BY-ROW
             bestCost = inf;
             target = [];
             
@@ -61,23 +60,35 @@ classdef NavigationPlanner
                         continue;
                     end
                     
-                    % Manhattan distance (primary factor)
-                    dist = abs(pos(1) - r) + abs(pos(2) - c);
+                    % CRITICAL: Prioritize completing current row before moving forward
+                    rowDist = abs(pos(1) - r);
                     
-                    % Small forward bonus (prefer exploring ahead)
-                    forwardBonus = (r > pos(1)) * -0.5;
-                    
-                    % Small height penalty (prefer lower blocks)
-                    heightPenalty = hMap(r, c) / 40.0;  % Reduced from /20
-                    
-                    % Confidence penalty for very low confidence
-                    confPenalty = 0;
-                    if conf(r, c) < 0.3
-                        confPenalty = 1.0;  % Reduced from 2.0
+                    % MASSIVE penalty for skipping rows
+                    if r < pos(1)
+                        rowDist = rowDist + 100;  % Never go backward
+                    elseif r > pos(1) + 1
+                        rowDist = rowDist + 50;   % Can't skip rows - explore row-by-row
+                    elseif r == pos(1) && belief(r, c) == "UNSEEN"
+                        rowDist = rowDist - 5;    % STRONG preference for same row
                     end
                     
-                    % Primary: minimize distance (explore nearby first!)
-                    cost = dist * 2.0 + forwardBonus + heightPenalty + confPenalty;
+                    colDist = abs(pos(2) - c);
+                    
+                    [hRows, hCols] = size(hMap);
+                    heightPenalty = 0;
+                    if r >= 1 && r <= hRows && c >= 1 && c <= hCols
+                        heightPenalty = hMap(r, c) / 100.0;
+                    end
+                    
+                    % STRONG bonus for partially visible cells
+                    confBonus = 0;
+                    if conf(r, c) > 0.5
+                        confBonus = -10.0;  % VERY strong preference
+                    elseif conf(r, c) > 0.3
+                        confBonus = -5.0;
+                    end
+                    
+                    cost = (rowDist * 20.0) + colDist + heightPenalty + confBonus;
                     
                     if cost < bestCost
                         bestCost = cost;
@@ -86,6 +97,7 @@ classdef NavigationPlanner
                 end
             end
         end
+
         
         function [target, blockedR1] = planExitRoute(pos, belief, conf, exits, arena, config)
             % Plan route to exit, avoiding R1/FAKE obstacles
@@ -98,6 +110,7 @@ classdef NavigationPlanner
             
             hMap = arena.getHeightMap();
             
+            % Try pathfinding to each exit
             for i = 1:size(exits, 1)
                 exitGoal = exits(i, :);
                 
@@ -124,15 +137,53 @@ classdef NavigationPlanner
                 return;
             end
             
-            % Check if exit blocked by R1
+            % FALLBACK 1: Try moving toward nearest exit (ignore obstacles temporarily)
+            fprintf("[NAV DEBUG] No direct path to exit, trying movement toward exit\n");
+            
+            minDist = inf;
+            nearestExit = [];
+            for i = 1:size(exits, 1)
+                dist = abs(pos(1) - exits(i,1)) + abs(pos(2) - exits(i,2));
+                if dist < minDist
+                    minDist = dist;
+                    nearestExit = exits(i, :);
+                end
+            end
+            
+            % Move one step toward nearest exit (simple greedy)
+            if ~isempty(nearestExit)
+                % Try moving down (toward exit rows 4)
+                if pos(1) < nearestExit(1) && pos(1) < config.FOREST_ROWS
+                    target = [pos(1) + 1, pos(2)];  % Move down one row
+                    fprintf("[NAV DEBUG] Moving toward exit: down to (%d,%d)\n", target);
+                    return;
+                end
+                
+                % Try moving horizontally toward exit column
+                if pos(2) < nearestExit(2)
+                    target = [pos(1), pos(2) + 1];  % Move right
+                    fprintf("[NAV DEBUG] Moving toward exit: right to (%d,%d)\n", target);
+                    return;
+                elseif pos(2) > nearestExit(2)
+                    target = [pos(1), pos(2) - 1];  % Move left
+                    fprintf("[NAV DEBUG] Moving toward exit: left to (%d,%d)\n", target);
+                    return;
+                end
+            end
+            
+            % FALLBACK 2: Check if exit blocked by R1
             for i = 1:size(exits, 1)
                 e = exits(i, :);
                 if belief(e(1), e(2)) == "R1" && conf(e(1), e(2)) >= config.VISION_CONFIDENCE_THRESHOLD
                     blockedR1 = e;
+                    fprintf("[NAV DEBUG] Exit at (%d,%d) blocked by R1\n", e);
                     return;
                 end
             end
+            
+            fprintf("[NAV ERROR] Could not find any exit route from (%d,%d)\n", pos);
         end
+
         
         function w = interpWeight(carryCount, w0, wFull, capacity)
             % Interpolate weight based on carry count

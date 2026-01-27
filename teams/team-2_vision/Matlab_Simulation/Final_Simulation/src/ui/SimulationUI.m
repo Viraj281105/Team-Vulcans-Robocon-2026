@@ -39,30 +39,79 @@ classdef SimulationUI < handle
             
             obj.setupFigure();
             obj.inputHandler = InputHandler(obj);
+            
+            % CRITICAL FIX: Ensure figure stays in focus
+            fprintf('[UI] Keyboard controls enabled - figure must have focus\n');
         end
         
         function setupFigure(obj)
             obj.fig = figure('Name', 'ROBOCON 2026 - 3D + NAV Simulation', ...
                 'Position', [50 50 1800 900], ...
                 'Color', [0.15 0.15 0.15], ...
-                'KeyPressFcn', @(src, event) obj.handleKeyPress(src, event), ...
                 'NumberTitle', 'off', ...
                 'MenuBar', 'none', ...
-                'ToolBar', 'figure');
+                'ToolBar', 'figure', ...
+                'WindowKeyPressFcn', @(src, event) obj.handleKeyPress(src, event));  % FIXED: Use WindowKeyPressFcn
             
             obj.axMain = subplot(2, 3, [1 4]);
             obj.axCam = subplot(2, 3, [2 3 5 6]);
+            
+            % CRITICAL FIX: Make figure interruptible for key events
+            set(obj.fig, 'BusyAction', 'cancel', 'Interruptible', 'on');
         end
         
         function handleKeyPress(obj, ~, event)
-            % Wrapper to call InputHandler's handleKey method
-            obj.inputHandler.handleKey([], event);
+            % Filter out system/modifier keys
+            systemKeys = {'alt', 'control', 'shift', 'tab', 'windows', 'command', 'capslock'};
+            
+            if ismember(lower(event.Key), systemKeys)
+                return;  % Silently ignore system keys - this allows Alt+Tab!
+            end
+            
+            fprintf('[UI DEBUG] Key pressed: %s\n', event.Key);
+            
+            % Handle UI-only keys directly (don't pass to InputHandler)
+            switch event.Key
+                case 'n'
+                    obj.autonomousMode = ~obj.autonomousMode;
+                    fprintf('[NAV] Autonomous mode %d\n', obj.autonomousMode);
+                    return;  % CRITICAL: Return here to prevent double-toggle!
+                    
+                case 'h'
+                    obj.showHelp = ~obj.showHelp;
+                    fprintf('[UI] Help overlay %d\n', obj.showHelp);
+                    return;  % Don't pass to InputHandler
+                    
+                case 'v'
+                    obj.autoTiltEnabled = ~obj.autoTiltEnabled;
+                    fprintf('[CAMERA] Auto-tilt %d\n', obj.autoTiltEnabled);
+                    return;  % Don't pass to InputHandler
+                    
+                case 'escape'
+                    obj.running = false;
+                    fprintf('[UI] Simulation ending...\n');
+                    close(obj.fig);
+                    return;
+            end
+            
+            % ONLY pass robot control keys (WASD, QE, etc.) to InputHandler
+            % Don't pass UI toggle keys
+            if ~isempty(obj.inputHandler)
+                obj.inputHandler.handleKey([], event);
+            end
         end
+
+
         
         function render(obj, robot, arena, vision, navigator, detections)
             % Main render function
             if ~obj.running || ~ishandle(obj.fig)
                 return;
+            end
+            
+            % CRITICAL FIX: Ensure figure stays in focus
+            if ~strcmp(get(obj.fig, 'CurrentObject'), '')
+                figure(obj.fig);  % Bring figure to front if it lost focus
             end
             
             robotState = robot.getState();
@@ -73,13 +122,16 @@ classdef SimulationUI < handle
             end
             
             % Render overview (left panel)
-            obj.renderOverview(robot, arena, vision);
+            obj.renderOverview(robot, arena, vision, navigator);
             
             % Render camera view (right panel)
-            obj.renderCameraView(robot, arena, vision, detections);
+            obj.renderCameraView(robot, arena, vision, detections, navigator);
+            
+            % Force graphics update
+            drawnow limitrate;
         end
         
-        function renderOverview(obj, robot, arena, vision)
+        function renderOverview(obj, robot, arena, vision, navigator)
             % Render the 3D overview (left panel)
             cfg = obj.config;
             set(obj.fig, 'CurrentAxes', obj.axMain);
@@ -121,10 +173,10 @@ classdef SimulationUI < handle
             end
             
             % Title with stats
-            stats = vision.getStats();
-            title(obj.axMain, sprintf('Mission: %.1fs | Dist: %.1fm | Yaw: %.0f° | Auto: %d', ...
-                stats.mission_time, robot.getTotalDistance()/1000, ...
-                robot.yaw, obj.autonomousMode), 'Color', 'white');
+            title(obj.axMain, sprintf('Mission: %.1fs | Dist: %.1fm | Yaw: %.0f° | Carry: %d/%d | Auto: %d', ...
+                toc(navigator.gameStartTime), robot.getTotalDistance()/1000, ...
+                robot.yaw, navigator.carry, cfg.CAPACITY, obj.autonomousMode), ...
+                'Color', 'white');
             
             % Help overlay
             if obj.showHelp
@@ -132,7 +184,7 @@ classdef SimulationUI < handle
             end
         end
         
-        function renderCameraView(obj, robot, arena, vision, detections)
+        function renderCameraView(obj, robot, arena, vision, detections, navigator)
             % Render camera view (right panel)
             cfg = obj.config;
             robotState = robot.getState();
@@ -172,18 +224,30 @@ classdef SimulationUI < handle
             kfsInView = Renderer.drawKFSInCameraView(obj.axCam, arena, ...
                 cameraPos, cameraYaw, vision.detectedKfs, cfg);
             
-            % HUD
-            stats = vision.getStats();
-            text(obj.axCam, 0.02, 0.98, sprintf('R2: %d/%d | R1: %d/%d | FAKE: %d/%d | InView: %d', ...
-                stats.r2_found, cfg.TOTAL_R2_REAL, ...
-                stats.r1_found, cfg.TOTAL_R1, ...
-                stats.fake_found, cfg.TOTAL_FAKE, ...
+            % HUD - Show detected vs picked counts
+            detectedR2 = sum(navigator.belief == "R2", 'all');
+            detectedR1 = sum(navigator.belief == "R1", 'all');
+            detectedFake = sum(navigator.belief == "FAKE", 'all');
+            
+            % First line: Detected counts
+            text(obj.axCam, 0.02, 0.98, sprintf('DETECTED → R2: %d/%d | R1: %d/%d | FAKE: %d/%d | InView: %d', ...
+                detectedR2, cfg.TOTAL_R2_REAL, ...
+                detectedR1, cfg.TOTAL_R1, ...
+                detectedFake, 1, ...
                 kfsInView), ...
                 'Units', 'normalized', 'Color', [0 1 0], 'FontSize', 11, ...
                 'FontWeight', 'bold', 'BackgroundColor', [0 0 0 0.7], ...
                 'VerticalAlignment', 'top');
             
-            text(obj.axCam, 0.02, 0.90, sprintf('Pitch: %.0f° | Yaw: %.0f° | Auto: %d', ...
+            % Second line: Picked/Carry count
+            text(obj.axCam, 0.02, 0.93, sprintf('PICKED → Carry: %d/%d | Mode: %s', ...
+                navigator.carry, cfg.CAPACITY, navigator.mode), ...
+                'Units', 'normalized', 'Color', [1 1 0], 'FontSize', 11, ...
+                'FontWeight', 'bold', 'BackgroundColor', [0 0 0 0.7], ...
+                'VerticalAlignment', 'top');
+            
+            % Third line: Camera info
+            text(obj.axCam, 0.02, 0.86, sprintf('Pitch: %.0f° | Yaw: %.0f° | Auto: %d', ...
                 obj.cameraPitch, cameraYaw, obj.autonomousMode), ...
                 'Units', 'normalized', 'Color', 'white', 'FontSize', 10, ...
                 'BackgroundColor', [0 0 0 0.7], 'VerticalAlignment', 'top');
@@ -276,7 +340,8 @@ classdef SimulationUI < handle
                 ' R    : Reset\n' ...
                 ' T    : Randomize\n' ...
                 ' P    : Record\n' ...
-                ' L    : Export']);
+                ' L    : Export\n' ...
+                ' H    : Toggle Help']);
             text(0.02, 0.98, helpText, 'Units', 'normalized', ...
                 'VerticalAlignment', 'top', 'Color', 'yellow', ...
                 'BackgroundColor', [0 0 0 0.8], 'FontName', 'FixedWidth', 'FontSize', 9);

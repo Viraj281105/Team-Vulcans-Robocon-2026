@@ -1,12 +1,7 @@
 classdef SimConfig < handle
     % SIMCONFIG Configuration class for Robocon 2026 Simulation
-    % Contains all constants, paths, and parameters
     
     properties (Constant)
-        % Dataset paths - UPDATED FOR ORGANIZED STRUCTURE
-        % This path is relative to the 'files' folder
-        % From: files/src/config/SimConfig.m
-        % To:   files/data/dataset/
         DATASET_PATH = fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'data', 'dataset')
         
         % Arena dimensions (mm)
@@ -40,28 +35,28 @@ classdef SimConfig < handle
         % Vision parameters
         CONF_THRESHOLD = 0.50
         DETECTION_RANGE = 2500
-        DETECTION_FOV = 90  % degrees
-        MIN_DETECTION_TIME = 0.5  % seconds
+        DETECTION_FOV = 90
+        MIN_DETECTION_TIME = 0.5
         
         % Navigation parameters
         CAPACITY = 2
-        TIME_LIMIT = 90  % seconds
-        TIME_BUFFER = 15  % seconds
+        TIME_LIMIT = 90
+        TIME_BUFFER = 15
         
         % Terrain costs
-        T_UP = 1.0      % per 20mm height increase
-        T_DOWN = 2.0    % per 20mm height decrease
-        T_PICK = 0.5    % picking time
+        T_UP = 1.0
+        T_DOWN = 2.0
+        T_PICK = 0.5
         
         % R1 waiting model
         WAIT_TIME = 5
         R1_CLEAR_PROB = 0.8
         
         % Dynamic weights
-        ALPHA0 = 3.0   % block weight when empty
-        BETA0 = 0.5    % exit weight when empty
-        ALPHA1 = 0.5   % block weight when full
-        BETA1 = 3.0    % exit weight when full
+        ALPHA0 = 3.0
+        BETA0 = 0.5
+        ALPHA1 = 0.5
+        BETA1 = 3.0
         
         % Vision confidence
         VISION_CONFIDENCE_THRESHOLD = 0.7
@@ -69,6 +64,7 @@ classdef SimConfig < handle
         % Colors
         COLOR_KFS_RED = [1 0 0]
         COLOR_KFS_BLUE = [0 0 1]
+        COLOR_KFS_WHITE = [1 1 1]  % NEW: White for R1
         COLOR_PATHWAY = [236 162 151]/255
         COLOR_ROBOT = [0.4 0.4 0.4]
         COLOR_BLOCK_LOW = [41 82 16]/255
@@ -85,11 +81,18 @@ classdef SimConfig < handle
         % Exit cells (grid coordinates)
         exitCells = [4 1; 4 3]
         
-        % Initial block ID
-        initialBlockId = 2
+        % Initial position - OPTIMIZED for viewing first row
+        initialBlockId = -1
+        initialRobotX = 3000      % Center X (aligned with middle column)
+        initialRobotY = 500       % OPTIMIZED: 1350mm from first row center
+        initialRobotZ = 0         % Ground level
+        
+        % Movement restrictions (BYPASS FLAGS)
+        ENFORCE_BLOCK_RESTRICTIONS = false
+        ENFORCE_R1_WAIT = false
         
         % Height map (mm)
-        heightMap = [200 200 400; ...
+        heightMap = [400 200 400; ...
                      200 400 600; ...
                      400 600 400; ...
                      200 400 200]
@@ -97,7 +100,6 @@ classdef SimConfig < handle
     
     methods
         function obj = SimConfig()
-            % Constructor - verify dataset path exists
             if ~exist(obj.DATASET_PATH, 'dir')
                 warning('SimConfig:DatasetNotFound', ...
                     'Dataset folder not found at: %s\nWill use placeholder images.', ...
