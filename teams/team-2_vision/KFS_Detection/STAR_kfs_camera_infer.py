@@ -17,7 +17,7 @@ import torch
 from torchvision import transforms
 
 # -------------------- PLATFORM DETECTION --------------------
-
+##
 IS_WINDOWS = platform.system().lower().startswith("win")
 IS_LINUX = platform.system().lower().startswith("linux")
 
@@ -31,13 +31,13 @@ TARGET_FPS = 30
 if IS_WINDOWS:
     MODEL_PATH = r"D:\\Robotics Club\\Robocon2026\\outputs_mobilenetv3\\kfs_mobilenetv3_large_rpi.pt"
 else:
-    MODEL_PATH = "/workspace/Robocon/kfs_mobilenetv3_large_rpi.pt"
+    MODEL_PATH = "./kfs_mobilenetv3_large_rpi.pt"
 
 MODEL_IMG_SIZE = (224, 224)
 
 # 🔥 Tuned threshold based on actual score distribution
 # REAL scores: 0.10-0.50, FAKE scores: 0.50-0.80
-CONF_THRESHOLD = 0.50  # Lower = classify as REAL, Higher = classify as FAKE
+CONF_THRESHOLD = 0.30  # Lower = classify as REAL, Higher = classify as FAKE
 
 MIN_CONTOUR_AREA = 1000  # 🔥 Increased for larger resolution
 
@@ -89,7 +89,11 @@ with torch.no_grad():
 # -------------------- CAMERA INIT --------------------
 
 print("[INFO] Initializing camera...")
-cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)  # DirectShow backend for Windows
+if IS_WINDOWS:
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+else:
+    cap = cv2.VideoCapture(CAMERA_INDEX)  # V4L2 on Linux
+    
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
@@ -100,7 +104,7 @@ if not cap.isOpened():
 
 # -------------------- GUI MODE --------------------
 
-GUI_AVAILABLE = IS_WINDOWS
+GUI_AVAILABLE = True
 if GUI_AVAILABLE:
     print("[INFO] GUI mode enabled. Initializing OpenCV windows...")
 else:
@@ -331,9 +335,9 @@ try:
                     status_text,
                     (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 255, 255),
-                    2
+                    1,
+                    (0, 0, 0),
+                    4
                 )
                 cv2.putText(
                     frame,
@@ -341,7 +345,7 @@ try:
                     (20, 80),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (255, 255, 255),
+                    (0, 165, 255),
                     2
                 )
                 cv2.putText(
@@ -350,7 +354,7 @@ try:
                     (20, 115),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 255, 0),
+                    (0, 0, 139),
                     2
                 )
                 
