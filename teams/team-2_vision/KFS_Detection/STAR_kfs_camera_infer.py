@@ -12,6 +12,19 @@ import time
 import cv2
 import numpy as np
 from collections import deque
+import serial
+
+ser = serial.Serial('/dev/ttyUSB0', 921600, timeout=1)
+
+time.sleep(2)  
+ser.reset_input_buffer()
+
+def sendEsp(msg):
+    message = f"{msg}\n"
+    ser.write(message.encode())
+    ser.flush()  # ensure data is sent immediately
+    print("Sent:", msg)
+
 
 import torch
 from torchvision import transforms
@@ -104,7 +117,7 @@ if not cap.isOpened():
 
 # -------------------- GUI MODE --------------------
 
-GUI_AVAILABLE = True
+GUI_AVAILABLE = False
 if GUI_AVAILABLE:
     print("[INFO] GUI mode enabled. Initializing OpenCV windows...")
 else:
@@ -253,6 +266,9 @@ try:
                 y1 = max(0, y)
                 x2 = min(FRAME_W, x + w)
                 y2 = min(FRAME_H, y + h)
+                
+               
+                
 
                 roi = frame[y1:y2, x1:x2]
                 roi_area = roi.shape[0] * roi.shape[1]
@@ -321,6 +337,11 @@ try:
         if time.time() - last_log_time >= 1.0:
             print(f"[STATUS] FPS={fps_display} | Target={detected_label} | Score={smooth_score:.2f}")
             last_log_time = time.time()
+            
+        if(detected_label == "REAL"):
+            sendEsp((((FRAME_W / 2) - (x + w / 2 )) * 2) / FRAME_W * 100)
+        else:
+            sendEsp("None")
 
         # Display GUI (Windows only)
         if GUI_AVAILABLE and frame_count >= 5:
